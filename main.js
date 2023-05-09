@@ -76,16 +76,12 @@ async function main() {
 
         if (pr) {
             core.info(`==> PR: ${pr}`)
-            /*
-              Commenting the below change in order to not override the value of input variable commit
-              if its passed already (same as branch). 
-            */
-            // const pull = await client.rest.pulls.get({
-            //     owner: owner,
-            //     repo: repo,
-            //     pull_number: pr,
-            // })
-            // commit = pull.data.head.sha
+            const pull = await client.rest.pulls.get({
+                owner: owner,
+                repo: repo,
+                pull_number: pr,
+            })
+            commit = pull.data.head.sha
             //branch = pull.data.head.ref
         }
 
