@@ -19,6 +19,15 @@ async function downloadAction(name, path) {
     core.setOutput("found_artifact", true)
 }
 
+async function getWorkflow(client, owner, repo, runID) {
+    const run = await client.rest.actions.getWorkflowRun({
+        owner: owner,
+        repo: repo,
+        run_id: runID || github.context.runId,
+    })
+    return run.data.workflow_id
+}
+
 async function main() {
     try {
         const token = core.getInput("github_token", { required: true })
@@ -29,6 +38,7 @@ async function main() {
         const skipUnpack = core.getBooleanInput("skip_unpack")
         const ifNoArtifactFound = core.getInput("if_no_artifact_found")
         let workflow = core.getInput("workflow")
+        let workflowSearch = core.getBooleanInput("workflow_search")
         let workflowConclusion = core.getInput("workflow_conclusion")
         let pr = core.getInput("pr")
         let commit = core.getInput("commit")
@@ -38,6 +48,7 @@ async function main() {
         let runNumber = core.getInput("run_number")
         let checkArtifacts = core.getBooleanInput("check_artifacts")
         let searchArtifacts = core.getBooleanInput("search_artifacts")
+        const allowForks = core.getBooleanInput("allow_forks")
         let dryRun = core.getInput("dry_run")
 
         const client = github.getOctokit(token)
@@ -46,16 +57,13 @@ async function main() {
         core.info(`==> Artifact name: ${name}`)
         core.info(`==> Local path: ${path}`)
 
-        if (!workflow) {
-            const run = await client.rest.actions.getWorkflowRun({
-                owner: owner,
-                repo: repo,
-                run_id: runID || github.context.runId,
-            })
-            workflow = run.data.workflow_id
+        if (!workflow && !workflowSearch) {
+            workflow = await getWorkflow(client, owner, repo, runID)
         }
 
-        core.info(`==> Workflow name: ${workflow}`)
+        if (workflow) {
+            core.info(`==> Workflow name: ${workflow}`)
+        }
         core.info(`==> Workflow conclusion: ${workflowConclusion}`)
 
         const uniqueInputSets = [
@@ -106,12 +114,15 @@ async function main() {
             core.info(`==> Run number: ${runNumber}`)
         }
 
+        core.info(`==> Allow forks: ${allowForks}`)
+
         if (!runID) {
+            const runGetter = workflow ? client.rest.actions.listWorkflowRuns : client.rest.actions.listWorkflowRunsForRepo
             // Note that the runs are returned in most recent first order.
-            for await (const runs of client.paginate.iterator(client.rest.actions.listWorkflowRuns, {
+            for await (const runs of client.paginate.iterator(runGetter, {
                 owner: owner,
                 repo: repo,
-                workflow_id: workflow,
+                ...(workflow ? { workflow_id: workflow } : {}),
                 ...(branch ? { branch } : {}),
                 ...(event ? { event } : {}),
                 ...(commit ? { head_sha: commit } : {}),
@@ -122,6 +133,10 @@ async function main() {
                         continue
                     }
                     if (workflowConclusion && (workflowConclusion != run.conclusion && workflowConclusion != run.status)) {
+                        continue
+                    }
+                    if (!allowForks && run.head_repository.full_name !== `${owner}/${repo}`) {
+                        core.info(`==> Skipping run from fork: ${run.head_repository.full_name}`)
                         continue
                     }
                     if (checkArtifacts || searchArtifacts) {
@@ -145,9 +160,15 @@ async function main() {
                             }
                         }
                     }
+
                     runID = run.id
                     core.info(`==> (found) Run ID: ${runID}`)
                     core.info(`==> (found) Run date: ${run.created_at}`)
+
+                    if (!workflow) {
+                        workflow = await getWorkflow(client, owner, repo, runID)
+                        core.info(`==> (found) Workflow: ${workflow}`)
+                    }
                     break
                 }
                 if (runID) {
@@ -219,7 +240,7 @@ async function main() {
         }
 
         core.setOutput("found_artifact", true)
-        
+
         for (const artifact of artifacts) {
             core.info(`==> Artifact: ${artifact.id}`)
 
@@ -236,7 +257,7 @@ async function main() {
                     archive_format: "zip",
                 })
             } catch (error) {
-                if (error.message === "Artifact has expired") {
+                if (error.message.startsWith("Artifact has expired")) {
                     return setExitMessage(ifNoArtifactFound, "no downloadable artifacts found (expired)")
                 } else {
                     throw new Error(error.message)
@@ -274,7 +295,7 @@ async function main() {
 
     function setExitMessage(ifNoArtifactFound, message) {
         core.setOutput("found_artifact", false)
-        
+
         switch (ifNoArtifactFound) {
             case "fail":
                 core.setFailed(message)
